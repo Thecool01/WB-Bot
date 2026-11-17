@@ -1,0 +1,6 @@
+{
+  "IntervalMinutes": 15,
+  "OzonOrderReminderMinutes": 60,
+  "SendEveryCheck": false,
+  "SendNews": true
+}
