@@ -180,7 +180,7 @@ function Send-OzonEvents {
         foreach ($event in $batch) { $notified[$event.Id] = $sentAt }
         Save-OzonEventHistory -Path $StatePath -History $notified
     }
-    Write-Host "$Heading — отправлено $($pending.Count)."
+    Write-WatchLog "$Heading — отправлено $($pending.Count)."
 }
 
 function Watch-Ozon {
@@ -205,10 +205,10 @@ function Watch-Ozon {
                     -Events $events -ReminderMinutes $OrderReminderMinutes
             }
             if (@($postings | Where-Object { [string]$_.delivery_method.warehouse_id -notin $account.Warehouses.Id }).Count -gt 0) {
-                Write-Host "Ozon FBS ($label). В ответе есть отправления вне выбранных складов."
+                Write-WatchLog "Ozon FBS ($label). В ответе есть отправления вне выбранных складов."
             }
         }
-        catch { [Console]::Error.WriteLine("Ozon FBS ($label). $($_.Exception.Message)") }
+        catch { Write-WatchLog "Ozon FBS ($label). $($_.Exception.Message)" -IsError }
 
         try {
             $events = @(
@@ -222,12 +222,12 @@ function Watch-Ozon {
                             @{ Id = "$($account.ClientId)/$($chat.chat.chat_id)/$($message.message_id)"; Line = $line }
                         }
                     }
-                    catch { [Console]::Error.WriteLine("Ozon Чат ($label). $($_.Exception.Message)") }
+                    catch { Write-WatchLog "Ozon Чат ($label). $($_.Exception.Message)" -IsError }
                 }
             )
             Send-OzonEvents $telegram "$historyPrefix-chats.txt" "Ozon · $label · непрочитанные сообщения покупателей" $events
         }
-        catch { [Console]::Error.WriteLine("Ozon Чаты ($label). $($_.Exception.Message)") }
+        catch { Write-WatchLog "Ozon Чаты ($label). $($_.Exception.Message)" -IsError }
     }
 }
 

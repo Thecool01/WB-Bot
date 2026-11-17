@@ -1,16 +1,21 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateSet('Setup', 'SetupTelegram', 'TestTelegram', 'Check', 'Watch',
-        'ExportTransfer', 'ImportTransfer', 'EnableStartup', 'DisableStartup', 'Menu', 'SetupOzon', 'CheckOzon')]
+        'ExportTransfer', 'ImportTransfer', 'EnableStartup', 'DisableStartup', 'Menu', 'SetupOzon', 'CheckOzon',
+        'StartBackground', 'StopBackground', 'ShowBackgroundLog')]
     [string]$Mode = 'Watch',
 
     [ValidateRange(1, 1440)]
     [int]$IntervalMinutes = 30,
 
-    [switch]$SendEveryCheck
+    [switch]$SendEveryCheck,
+
+    [switch]$Background
 )
 
 $tokenDirectory = Join-Path $env:LOCALAPPDATA 'WB Feedback Bot'
+$backgroundStopPath = Join-Path $tokenDirectory 'background.stop'
+$backgroundLogPath = Join-Path $tokenDirectory 'background.log'
 $tokenPath = Join-Path $tokenDirectory 'token.dpapi'
 $telegramPath = Join-Path $tokenDirectory 'telegram.json'
 $ozonPath = Join-Path $tokenDirectory 'ozon.json'
@@ -296,6 +301,21 @@ function Read-NotifiedIds {
     return ,$ids
 }
 
+function Write-WatchLog {
+    param([string]$Message, [switch]$IsError)
+
+    $line = '[{0:dd.MM.yyyy HH:mm:ss}] {1}' -f (Get-Date), $Message
+    if ($Background) {
+        [IO.File]::AppendAllText($backgroundLogPath, $line + [Environment]::NewLine)
+    }
+    elseif ($IsError) {
+        [Console]::Error.WriteLine($line)
+    }
+    else {
+        Write-Host $line
+    }
+}
+
 function Send-WbUpdates {
     param($Telegram, $Token, $Counts, [string]$StatePath)
 
@@ -318,14 +338,13 @@ function Send-WbUpdates {
     $message = "Wildberries — новых отзывов без ответа $newCount.`nВсего ждут ответа $($currentIds.Count).`nWB Partners → Товары и цены → Отзывы и вопросы."
     Send-TelegramMessage -Telegram $Telegram -Message $message
     Write-LocalFile -Path $StatePath -Content ($notifiedIds -join "`n")
-    Write-Host 'Уведомление отправлено в Telegram.'
+    Write-WatchLog 'Уведомление отправлено в Telegram.'
 }
 
 function Show-WbFeedbackCounts {
     param($Counts)
 
-    Write-Host ('[{0:dd.MM.yyyy HH:mm:ss}] WB — необработанных отзывов {1}, из них за сегодня {2}.' -f
-        (Get-Date), $Counts.Total, $Counts.Today)
+    Write-WatchLog ('WB — необработанных отзывов {0}, из них за сегодня {1}.' -f $Counts.Total, $Counts.Today)
 }
 
 function Read-WbNewsState {
@@ -381,7 +400,7 @@ function Send-WbNews {
     if ($null -eq $state) {
         if ($newIds.Count -gt 0) { $lastId = $newIds[-1] }
         Save-WbNewsState -Path $StatePath -FromDate $fromDate -LastId $lastId
-        Write-Host 'Новости WB подключены. Будут отправляться новые публикации.'
+        Write-WatchLog 'Новости WB подключены. Будут отправляться новые публикации.'
         return
     }
     if ($newIds.Count -eq 0) { return }
@@ -396,7 +415,7 @@ function Send-WbNews {
     $message = "Новости WB Partners`n`n" + ($lines -join "`n`n")
     Send-TelegramMessage -Telegram $Telegram -Message $message -DisableLinkPreview
     Save-WbNewsState -Path $StatePath -FromDate $fromDate -LastId $lastId
-    Write-Host 'Новости WB отправлены в Telegram.'
+    Write-WatchLog 'Новости WB отправлены в Telegram.'
 }
 
 function Open-WatchLock {
@@ -406,15 +425,19 @@ function Open-WatchLock {
         [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
     }
     catch {
-        throw 'Не удалось получить доступ к настройкам. Если бот запущен, остановите его через Ctrl+C.'
+        throw 'Бот уже запущен или настройки заняты. Остановите бота пунктом 11 в setup-bot.cmd или через Ctrl+C в его окне.'
     }
 }
 
-if ($Mode -in 'ExportTransfer', 'ImportTransfer', 'EnableStartup', 'DisableStartup', 'Menu') {
+if ($Mode -in 'ExportTransfer', 'ImportTransfer', 'EnableStartup', 'DisableStartup', 'Menu',
+    'StartBackground', 'StopBackground', 'ShowBackgroundLog') {
     try {
         . (Join-Path $PSScriptRoot 'wb-bot-setup.ps1')
         if ($Mode -eq 'Menu') {
             Show-WbSetupMenu
+        }
+        elseif ($Mode -in 'StartBackground', 'StopBackground', 'ShowBackgroundLog') {
+            Invoke-WbBackgroundControl -Action $Mode
         }
         elseif ($Mode -in 'ExportTransfer', 'ImportTransfer') {
             $transferLock = Open-WatchLock
@@ -531,7 +554,7 @@ try {
             . (Join-Path $PSScriptRoot 'ozon-bot.ps1')
             $ozon = Read-OzonSettings
         }
-        catch { [Console]::Error.WriteLine($_.Exception.Message) }
+        catch { Write-WatchLog $_.Exception.Message -IsError }
     }
     if ([IO.File]::Exists($configPath)) {
         try {
@@ -572,21 +595,22 @@ try {
                 throw 'Для отправки сводок WB в Telegram сначала выполните SetupTelegram.'
             }
             else {
-                Write-Host 'Для уведомлений WB выполните SetupTelegram. Счётчики WB будут выводиться в PowerShell.'
+                Write-WatchLog 'Для уведомлений WB выполните SetupTelegram.'
             }
         }
         catch {
-            [Console]::Error.WriteLine("WB. $($_.Exception.Message)")
+            Write-WatchLog "WB. $($_.Exception.Message)" -IsError
             $wbEnabled = $false
         }
     }
     if (-not $wbEnabled -and $null -eq $ozon) { throw 'Сначала настройте WB или Ozon через setup-bot.cmd.' }
 
     $services = if ($wbEnabled -and $ozon) { 'WB и Ozon' } elseif ($wbEnabled) { 'WB' } else { 'Ozon' }
-    Write-Host "Проверка $services каждые $IntervalMinutes мин. Для остановки нажмите Ctrl+C."
+    Write-WatchLog "Проверка $services каждые $IntervalMinutes мин."
+    if (-not $Background) { Write-Host 'Для остановки нажмите Ctrl+C.' }
 
     $wbRetryAt = [datetime]::MinValue
-    while ($true) {
+    while (-not $Background -or -not [IO.File]::Exists($backgroundStopPath)) {
         $intervalSeconds = $IntervalMinutes * 60
         $wbWaitSeconds = $intervalSeconds
         if ($null -ne $ozon) { Watch-Ozon -Ozon $ozon -OrderReminderMinutes $ozonOrderReminderMinutes }
@@ -596,7 +620,7 @@ try {
                     Send-WbNews -Telegram $telegram -Token $token -StatePath $newsStatePath
                 }
                 catch {
-                    [Console]::Error.WriteLine(('[{0:dd.MM.yyyy HH:mm:ss}] Новости WB. {1}' -f (Get-Date), $_.Exception.Message))
+                    Write-WatchLog "Новости WB. $($_.Exception.Message)" -IsError
                 }
             }
             try {
@@ -605,14 +629,14 @@ try {
                 if ($SendEveryCheck) {
                     $message = "Wildberries — сводка по отзывам.`nВсего ждут ответа $($counts.Total).`nЗа сегодня $($counts.Today)."
                     Send-TelegramMessage -Telegram $telegram -Message $message
-                    Write-Host 'Сводка отправлена в Telegram.'
+                    Write-WatchLog 'Сводка отправлена в Telegram.'
                 }
                 elseif ($null -ne $telegram) {
                     Send-WbUpdates -Telegram $telegram -Token $token -Counts $counts -StatePath $statePath
                 }
             }
             catch {
-                [Console]::Error.WriteLine(('[{0:dd.MM.yyyy HH:mm:ss}] {1}' -f (Get-Date), $_.Exception.Message))
+                Write-WatchLog $_.Exception.Message -IsError
                 if ($_.Exception.Data['Status'] -in 401, 402, 403) {
                     if ($null -eq $ozon) { exit 1 }
                     $wbEnabled = $false
@@ -624,12 +648,21 @@ try {
                 }
             }
         }
-        if ($null -eq $ozon) { Start-Sleep -Seconds $wbWaitSeconds }
-        else { Start-Sleep -Seconds $intervalSeconds }
+        $waitSeconds = if ($null -eq $ozon) { $wbWaitSeconds } else { $intervalSeconds }
+        if ($Background) {
+            $resumeAt = [DateTime]::UtcNow.AddSeconds($waitSeconds)
+            while ([DateTime]::UtcNow -lt $resumeAt -and -not [IO.File]::Exists($backgroundStopPath)) {
+                Start-Sleep -Seconds 1
+            }
+        }
+        else {
+            Start-Sleep -Seconds $waitSeconds
+        }
     }
+    Write-WatchLog 'Фоновый бот остановлен.'
 }
 catch {
-    [Console]::Error.WriteLine($_.Exception.Message)
+    Write-WatchLog $_.Exception.Message -IsError
     exit 1
 }
 finally {

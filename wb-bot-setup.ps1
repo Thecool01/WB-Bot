@@ -233,6 +233,64 @@ function Import-WbTransfer {
     Write-Host 'Настройки перенесены. Запустите start-bot.cmd двойным щелчком.'
 }
 
+function Invoke-WbBackgroundControl {
+    param([string]$Action)
+
+    if ($Action -eq 'ShowBackgroundLog') {
+        Write-Host $backgroundLogPath
+        if ([IO.File]::Exists($backgroundLogPath)) { Get-Content -LiteralPath $backgroundLogPath -Tail 30 -Encoding UTF8 }
+        else { Write-Host 'Журнал пока пуст.' }
+        return
+    }
+
+    [void][IO.Directory]::CreateDirectory($tokenDirectory)
+    $controlPath = Join-Path $tokenDirectory 'background-control.lock'
+    $control = [IO.File]::Open($controlPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $processPath = Join-Path $tokenDirectory 'background-process.json'
+        $worker = $null
+        if ([IO.File]::Exists($processPath)) {
+            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($processPath)) -ErrorAction Stop
+            $candidate = Get-Process -Id $saved.Id -ErrorAction SilentlyContinue
+            if ($candidate -and $candidate.ProcessName -eq 'powershell' -and
+                [string]$candidate.StartTime.ToUniversalTime().Ticks -ceq $saved.Started) {
+                $worker = $candidate
+            }
+        }
+
+        if ($Action -eq 'StopBackground') {
+            if ($null -eq $worker) {
+                Write-Host 'Фоновый бот сейчас не запущен.'
+                return
+            }
+            Write-LocalFile -Path $backgroundStopPath -Content 'stop'
+            if ($worker.WaitForExit(5000)) { Write-Host 'Фоновый бот остановлен.' }
+            else { Write-Host 'Бот остановится после текущей проверки.' }
+            return
+        }
+
+        if ($null -ne $worker) {
+            Write-Host 'Фоновый бот уже запущен.'
+            return
+        }
+        $probe = Open-WatchLock
+        $probe.Dispose()
+        [IO.File]::Delete($backgroundStopPath)
+        Write-LocalFile -Path $backgroundLogPath -Content ''
+        $script = Join-Path $PSScriptRoot 'wb-bot.ps1'
+        $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script`" -Mode Watch -Background"
+        $worker = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments `
+            -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if ($worker.WaitForExit(1200)) { throw 'Фоновый бот завершился при запуске. Детали в журнале, пункт 12.' }
+        $state = @{ Id = $worker.Id; Started = [string]$worker.StartTime.ToUniversalTime().Ticks }
+        Write-LocalFile -Path $processPath -Content (ConvertTo-Json $state -Compress)
+        Write-Host 'Фоновый бот запущен. Окно настройки можно закрыть. Журнал — пункт 12.'
+    }
+    finally {
+        $control.Dispose()
+    }
+}
+
 function Set-WbStartup {
     param([bool]$Enabled)
 
@@ -241,11 +299,11 @@ function Set-WbStartup {
     if ([string]::IsNullOrWhiteSpace($startup)) { throw 'Windows не вернула папку автозагрузки текущего пользователя.' }
     $shortcutPath = Join-Path $startup 'WB Feedback Bot.lnk'
     if ($Enabled) {
-        $launcher = Join-Path $PSScriptRoot 'start-bot.cmd'
-        if (-not [IO.File]::Exists($launcher)) { throw 'Файл start-bot.cmd отсутствует рядом со скриптом.' }
+        $script = Join-Path $PSScriptRoot 'wb-bot.ps1'
         $shell = New-Object -ComObject WScript.Shell -ErrorAction Stop
         $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = $launcher
+        $shortcut.TargetPath = Join-Path $PSHOME 'powershell.exe'
+        $shortcut.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Mode StartBackground"
         $shortcut.WorkingDirectory = $PSScriptRoot
         $shortcut.Description = 'WB Feedback Bot'
         $shortcut.Save()
@@ -267,6 +325,9 @@ function Show-WbSetupMenu {
     Write-Host '7. Проверить доступ к WB'
     Write-Host '8. Настроить Ozon и его бота Telegram'
     Write-Host '9. Проверить доступ к Ozon'
+    Write-Host '10. Запустить бота в фоне'
+    Write-Host '11. Остановить фонового бота'
+    Write-Host '12. Показать журнал фонового бота'
     Write-Host '0. Выход'
     $selectedMode = switch (Read-Host 'Выберите действие') {
         '1' { 'Setup' }
@@ -278,8 +339,11 @@ function Show-WbSetupMenu {
         '7' { 'Check' }
         '8' { 'SetupOzon' }
         '9' { 'CheckOzon' }
+        '10' { 'StartBackground' }
+        '11' { 'StopBackground' }
+        '12' { 'ShowBackgroundLog' }
         '0' { return }
-        default { throw 'Выберите номер от 0 до 9.' }
+        default { throw 'Выберите номер от 0 до 12.' }
     }
     & (Join-Path $PSScriptRoot 'wb-bot.ps1') -Mode $selectedMode
     exit $LASTEXITCODE
